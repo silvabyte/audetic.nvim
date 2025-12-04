@@ -19,7 +19,7 @@ local default_config = {
   },
   voice = {
     enabled = true,
-    keybind = "<leader>v", -- Push-to-talk keybind
+    keybind = "<leader>r", -- Push-to-talk keybind
   },
   ui = {
     window_width = 45, -- Feedback window width
