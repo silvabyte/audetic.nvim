@@ -6,9 +6,9 @@ Speak your intent, and let AI make the changes. No typing required.
 
 ## How It Works
 
-1. Press `<leader>v` to start recording
+1. Press `<leader>r` to start recording
 2. Speak your command (e.g., "add error handling to this function", "rename this variable to userCount")
-3. Press `<leader>v` again to stop
+3. Press `<leader>r` again to stop
 4. Watch as the AI executes your command on the current buffer
 
 ## Requirements
@@ -31,7 +31,7 @@ return {
       model_id = "claude-sonnet-4-20250514",
     },
     voice = {
-      keybind = "<leader>v",  -- Push-to-talk
+      keybind = "<leader>r",  -- Push-to-talk
     },
   },
 }
@@ -60,7 +60,7 @@ require("audetic").setup({
   -- Voice settings
   voice = {
     enabled = true,
-    keybind = "<leader>v",
+    keybind = "<leader>r",
   },
 
   -- UI settings
@@ -76,7 +76,7 @@ require("audetic").setup({
 
 | Key | Action |
 |-----|--------|
-| `<leader>v` | Start/stop voice recording |
+| `<leader>r` | Start/stop voice recording |
 
 ## Commands
 
