@@ -28,7 +28,7 @@ return {
   opts = {
     model = {
       provider = "anthropic",
-      model_id = "claude-sonnet-4-20250514",
+      model_id = "claude-haiku-4-5",
     },
     voice = {
       keybind = "<leader>r",  -- Push-to-talk
@@ -54,7 +54,7 @@ require("audetic").setup({
   -- AI model settings
   model = {
     provider = "anthropic",
-    model_id = "claude-sonnet-4-20250514",
+    model_id = "claude-haiku-4-5",
   },
 
   -- Voice settings

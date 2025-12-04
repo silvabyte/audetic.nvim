@@ -15,7 +15,7 @@ local default_config = {
   },
   model = {
     provider = "anthropic",
-    model_id = "claude-sonnet-4-20250514",
+    model_id = "claude-haiku-4-5",
   },
   voice = {
     enabled = true,
