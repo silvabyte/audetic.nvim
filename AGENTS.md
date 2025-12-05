@@ -47,3 +47,5 @@ lua/
 - **voice.lua** - Core voice functionality: Audetic API integration, recording state machine, feedback UI
 - **server.lua** - Manages OpenCode server lifecycle (auto-start, health checks)
 - **client.lua** - Session pooling and message sending to OpenCode API
+
+BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions
