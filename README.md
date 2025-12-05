@@ -43,34 +43,31 @@ Run `:checkhealth audetic` to verify your setup.
 
 ```lua
 require("audetic").setup({
-  -- OpenCode server settings
   server = {
-    url = nil,        -- nil = auto-start server
-    port = nil,       -- nil = auto-allocate free port
+    url = nil,           -- nil = auto-start server
+    port = nil,          -- nil = auto-allocate free port
     auto_start = true,
-    timeout = 15000,
+    timeout = 15000,     -- request timeout (ms)
   },
-
-  -- AI model settings
   model = {
     provider = "anthropic",
     model_id = "claude-haiku-4-5",
   },
-
-  -- Voice settings
   voice = {
     enabled = true,
     keybind = "<leader>r",
   },
-
-  -- UI settings
   ui = {
-    window_width = 45,
-    success_duration = 2000,  -- ms
-    error_duration = 4000,    -- ms
+    window_width = 50,      -- feedback window width
+    window_max_height = 10, -- feedback window max height
+    max_event_log = 50,     -- max messages in chat log
+    success_duration = 2000,
+    error_duration = 4000,
   },
 })
 ```
+
+All options shown are defaults.
 
 ## Keybindings
 

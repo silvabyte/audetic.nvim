@@ -54,14 +54,13 @@ local sse_job = nil
 ---@type string|nil Current session ID being tracked
 local current_session_id = nil
 
----@type string[] Event log for displaying in UI
+---@type string[] Event log for displaying in UI (chat history, newest last)
 local event_log = {}
 
----@type number Max events to keep in log (only showing latest)
-local MAX_EVENT_LOG = 1
-
----@type number Fixed width for feedback window (prevents resize jank)
-local FEEDBACK_WINDOW_WIDTH = 45
+--- Default values for UI configuration
+local DEFAULT_MAX_EVENT_LOG = 50
+local DEFAULT_WINDOW_WIDTH = 50
+local DEFAULT_WINDOW_MAX_HEIGHT = 10
 
 ---@type number|nil Throttle timer for UI updates
 local ui_update_timer = nil
@@ -140,35 +139,30 @@ local function stop_sse()
   end
 end
 
----Add event to log and update UI
+---Add event to log (chat style - newest at bottom)
 ---@param event_text string Event text to display
 local function add_event_to_log(event_text)
   -- Sanitize: replace newlines with spaces to avoid nvim_buf_set_lines errors
   local sanitized = event_text:gsub("\r?\n", " "):gsub("%s+", " ")
-  table.insert(event_log, 1, sanitized)
-  if #event_log > MAX_EVENT_LOG then
-    table.remove(event_log)
+  -- Append to end (newest last, for chat-style scrolling)
+  table.insert(event_log, sanitized)
+  -- Trim old entries from the front
+  local ui_config = config.get_ui() or {}
+  local max_events = ui_config.max_event_log or DEFAULT_MAX_EVENT_LOG
+  while #event_log > max_events do
+    table.remove(event_log, 1)
   end
 end
 
 ---Update the executing UI with event log (internal, called by throttled version)
----@param command string The voice command
-local function _do_update_executing_ui(command)
-  local cmd_text = command or "..."
-  if #cmd_text > 35 then
-    cmd_text = cmd_text:sub(1, 32) .. "..."
-  end
-
-  -- Show latest event as the status, command as context
-  local status = event_log[1] or "Waiting for agent..."
-  local lines = { 'Heard: "' .. cmd_text .. '"' }
-
-  show_feedback_window("⠋ " .. status, lines, "DiagnosticInfo")
+local function _do_update_executing_ui()
+  -- Pass all messages - window will handle wrapping and scrolling
+  local messages = #event_log > 0 and event_log or { "Waiting for agent..." }
+  show_feedback_window("Running...", messages, "DiagnosticInfo", true)
 end
 
 ---Throttled UI update to prevent rapid flashing
----@param command string The voice command
-local function update_executing_ui(command)
+local function update_executing_ui()
   -- Mark that an update is pending
   ui_update_pending = true
 
@@ -178,7 +172,7 @@ local function update_executing_ui(command)
   end
 
   -- Execute immediately for the first update
-  _do_update_executing_ui(command)
+  _do_update_executing_ui()
   ui_update_pending = false
 
   -- Start throttle timer to batch subsequent rapid updates
@@ -188,7 +182,7 @@ local function update_executing_ui(command)
     UI_UPDATE_THROTTLE_MS,
     vim.schedule_wrap(function()
       if ui_update_pending then
-        _do_update_executing_ui(command)
+        _do_update_executing_ui()
         ui_update_pending = false
       else
         -- No pending updates, stop the timer
@@ -227,8 +221,7 @@ end
 
 ---Handle SSE event from OpenCode
 ---@param data table Event data
----@param command string The voice command for UI updates
-local function handle_sse_event(data, command)
+local function handle_sse_event(data)
   if not data then
     return
   end
@@ -284,13 +277,10 @@ local function handle_sse_event(data, command)
         end
       elseif part_type == "text" then
         local text = part.text or properties.delta or ""
-        if #text > 50 then
-          text = text:sub(1, 47) .. "..."
-        end
-        -- Only show non-empty text
+        -- Only show non-empty text (no truncation - window will wrap)
         text = text:gsub("^%s+", ""):gsub("%s+$", "")
         if text ~= "" then
-          add_event_to_log(".. " .. text)
+          add_event_to_log(text)
         end
       elseif part_type == "reasoning" then
         add_event_to_log("?? Thinking...")
@@ -332,15 +322,14 @@ local function handle_sse_event(data, command)
   -- Update the UI
   vim.schedule(function()
     if voice_state == "executing" then
-      update_executing_ui(command)
+      update_executing_ui()
     end
   end)
 end
 
 ---Start SSE event stream for a session
 ---@param session_id string Session ID to track
----@param command string The voice command for UI context
-local function start_sse(session_id, command)
+local function start_sse(session_id)
   stop_sse()
 
   current_session_id = session_id
@@ -363,7 +352,7 @@ local function start_sse(session_id, command)
           if line and line ~= "" then
             local _, event_data = parse_sse_line(line)
             if event_data then
-              handle_sse_event(event_data, command)
+              handle_sse_event(event_data)
             end
           end
         end
@@ -405,30 +394,93 @@ local function fit_to_width(str, width)
   return str
 end
 
+---Wrap text to fit within a given width
+---@param text string Text to wrap
+---@param width number Max width per line
+---@return string[] wrapped_lines
+local function wrap_text(text, width)
+  local lines = {}
+  local remaining = text
+
+  while #remaining > 0 do
+    if vim.fn.strdisplaywidth(remaining) <= width then
+      table.insert(lines, remaining)
+      break
+    end
+
+    -- Find a good break point (prefer word boundaries)
+    local break_at = width
+    -- Walk back to find a space
+    for i = width, 1, -1 do
+      local char = remaining:sub(i, i)
+      if char == " " then
+        break_at = i
+        break
+      end
+    end
+
+    -- If no space found in reasonable range, just hard break
+    if break_at < width * 0.5 then
+      break_at = width
+    end
+
+    local line = remaining:sub(1, break_at):gsub("%s+$", "")
+    table.insert(lines, line)
+    remaining = remaining:sub(break_at + 1):gsub("^%s+", "")
+  end
+
+  return lines
+end
+
+---@type number|nil Last known window height (for smooth transitions)
+local last_window_height = nil
+
 ---Create or update the feedback floating window
 ---@param title string Window title
 ---@param lines string[] Content lines
 ---@param hl_group? string Highlight group for the title
-show_feedback_window = function(title, lines, hl_group)
+---@param auto_scroll? boolean Whether to auto-scroll to bottom (for chat mode)
+show_feedback_window = function(title, lines, hl_group, auto_scroll)
   hl_group = hl_group or "Normal"
 
-  -- Use fixed dimensions to prevent resize jank
   local ui_config = config.get_ui() or {}
-  local width = ui_config.window_width or FEEDBACK_WINDOW_WIDTH
-  local height = 5 -- Fixed height: title + separator + 3 content lines
+  local width = ui_config.window_width or DEFAULT_WINDOW_WIDTH
+  local max_height = ui_config.window_max_height or DEFAULT_WINDOW_MAX_HEIGHT
+  local content_width = width - 4 -- Account for padding and border
 
-  -- Build content with fixed-width lines (prevents layout shift)
-  local content_width = width - 2 -- Account for padding
+  -- Build content: title + separator
   local content = {
-    " " .. fit_to_width(title, content_width - 1),
+    " " .. fit_to_width(title, content_width),
     string.rep("-", width - 2),
   }
 
-  -- Add content lines, ensuring we always have exactly 3 lines
-  for i = 1, 3 do
-    local line = lines[i] or ""
-    table.insert(content, " " .. fit_to_width(line, content_width - 1))
+  -- Wrap and add all content lines
+  for _, line in ipairs(lines) do
+    local wrapped = wrap_text(line, content_width)
+    for _, wrapped_line in ipairs(wrapped) do
+      table.insert(content, " " .. wrapped_line)
+    end
   end
+
+  -- Calculate desired height (content lines + title + separator)
+  -- Minimum 4 lines (title + separator + at least 2 content lines)
+  local content_lines = #content - 2 -- subtract title and separator
+  local desired_height = math.max(4, math.min(2 + content_lines, max_height))
+
+  -- Smooth height transitions: only grow, don't shrink rapidly
+  -- This prevents jank when messages alternate between short and long
+  if last_window_height then
+    -- Allow growing immediately, but shrink slowly
+    if desired_height < last_window_height then
+      -- Only shrink if significantly smaller (by 2+ lines)
+      if last_window_height - desired_height >= 2 then
+        desired_height = last_window_height - 1 -- Shrink by 1
+      else
+        desired_height = last_window_height -- Keep current
+      end
+    end
+  end
+  last_window_height = desired_height
 
   -- Create buffer if needed
   if not feedback_buf or not vim.api.nvim_buf_is_valid(feedback_buf) then
@@ -451,14 +503,14 @@ show_feedback_window = function(title, lines, hl_group)
   local row = 1
   local col = ui_info.width - width - 2
 
-  -- Create or update window (only create once, never resize)
+  -- Create window if needed
   if not feedback_win or not vim.api.nvim_win_is_valid(feedback_win) then
     feedback_win = vim.api.nvim_open_win(feedback_buf, false, {
       relative = "editor",
       row = row,
       col = col,
       width = width,
-      height = height,
+      height = desired_height,
       style = "minimal",
       border = "rounded",
       focusable = false,
@@ -466,9 +518,32 @@ show_feedback_window = function(title, lines, hl_group)
     })
     -- Set window options
     vim.api.nvim_set_option_value("winblend", 10, { win = feedback_win })
+    vim.api.nvim_set_option_value("wrap", false, { win = feedback_win }) -- We handle wrapping manually
+  else
+    -- Update window height if it changed
+    local current_config = vim.api.nvim_win_get_config(feedback_win)
+    if current_config.height ~= desired_height then
+      vim.api.nvim_win_set_config(feedback_win, {
+        relative = "editor",
+        row = row,
+        col = col,
+        width = width,
+        height = desired_height,
+      })
+    end
   end
-  -- Note: We intentionally don't call nvim_win_set_config on updates
-  -- to prevent window resize/position jank. Content updates only.
+
+  -- Auto-scroll to bottom for chat mode
+  if auto_scroll and feedback_win and vim.api.nvim_win_is_valid(feedback_win) then
+    local line_count = vim.api.nvim_buf_line_count(feedback_buf)
+    -- Scroll so the last line is visible at the bottom of the window
+    pcall(function()
+      vim.api.nvim_win_set_cursor(feedback_win, { line_count, 0 })
+      vim.api.nvim_win_call(feedback_win, function()
+        vim.cmd("normal! zb")
+      end)
+    end)
+  end
 end
 
 ---Close the feedback window
@@ -487,6 +562,7 @@ local function close_feedback_window()
   end
   feedback_win = nil
   feedback_buf = nil
+  last_window_height = nil -- Reset for next session
 end
 
 ---Start animation for feedback window
@@ -568,18 +644,19 @@ local function set_state(new_state, extra_info)
     start_animation("processing")
     vim.g.audetic_voice_status = "[...]"
   elseif new_state == "executing" then
-    local cmd_text = extra_info.command or "..."
-    -- Truncate long commands
-    if #cmd_text > 35 then
-      cmd_text = cmd_text:sub(1, 32) .. "..."
+    -- Stop any running animation from previous state (e.g., processing)
+    -- so it doesn't overwrite our SSE event updates
+    if animation_timer then
+      animation_timer:stop()
+      animation_timer:close()
+      animation_timer = nil
     end
-    -- Initial state - will be updated by SSE events
-    show_feedback_window("~ Executing...", {
-      'Heard: "' .. cmd_text .. '"',
-      "",
+    -- Initial state - will be updated by SSE events with incoming messages
+    show_feedback_window("Running...", {
       "Waiting for agent...",
+      "",
+      "",
     }, "DiagnosticInfo")
-    start_animation("executing")
     vim.g.audetic_voice_status = "[AI]"
   end
 end
@@ -659,7 +736,7 @@ local function execute_voice_command(transcription)
     end
 
     -- Start SSE to stream events for this session
-    start_sse(session_id, transcription)
+    start_sse(session_id)
 
     -- Use a longer timeout for voice commands since they run agentically (10 min)
     client.send_message(session_id, prompt, { timeout = 600 }, function(msg_success, result)
