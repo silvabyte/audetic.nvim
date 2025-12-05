@@ -9,9 +9,6 @@ local server = require("audetic.server")
 ---@type table<string, string> Session pool keyed by project root
 local session_pool = {}
 
----@type table<string, number> Session last used timestamps
-local session_last_used = {}
-
 ---@type number|nil Current job ID for cancellation
 local current_job_id = nil
 
@@ -63,7 +60,9 @@ function M.request(method, path, body, callback, opts)
 
   utils.debug("HTTP request", { method = method, path = path, url = full_url })
 
-  -- Cancel any previous request
+  -- Cancel any previous request. Only one request can be in-flight at a time.
+  -- This is intentional for voice commands where we want the latest request
+  -- to take precedence and avoid race conditions.
   M.cancel()
 
   -- Capture current request ID for staleness check
@@ -150,12 +149,9 @@ function M.request(method, path, body, callback, opts)
 end
 
 ---Create a new session
----@param project_dir string Project directory
 ---@param callback function Callback(success, session)
-function M.create_session(_, callback)
-  M.request("POST", "/session", {
-    -- Optional: can send empty body or include directory
-  }, callback)
+function M.create_session(callback)
+  M.request("POST", "/session", {}, callback)
 end
 
 ---Delete session
@@ -215,20 +211,20 @@ function M._get_pooled_session(project_root, callback)
   -- Check if we have a valid pooled session
   local existing_session = session_pool[project_root]
   if existing_session then
-    session_last_used[project_root] = os.time()
     utils.debug("Reusing pooled session", { id = existing_session })
     callback(true, existing_session)
     return
   end
 
   -- Create new session and pool it
-  M.create_session(project_root, function(success, session)
+  M.create_session(function(success, result)
     if not success then
-      callback(false, session)
+      callback(false, result) -- result is error message on failure
       return
     end
 
-    local session_id = session.id or session.sessionID or session.session_id
+    -- API may return session ID under different keys
+    local session_id = result.id or result.sessionID or result.session_id
     if not session_id then
       callback(false, "Session ID not found in response")
       return
@@ -236,7 +232,6 @@ function M._get_pooled_session(project_root, callback)
 
     -- Pool the session
     session_pool[project_root] = session_id
-    session_last_used[project_root] = os.time()
     utils.debug("Created and pooled session", { id = session_id, project = project_root })
 
     callback(true, session_id)
@@ -249,7 +244,6 @@ function M.clear_session_pool()
     M.delete_session(session_id, function() end)
   end
   session_pool = {}
-  session_last_used = {}
   utils.debug("Cleared session pool")
 end
 
