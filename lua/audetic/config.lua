@@ -20,9 +20,11 @@
 ---@field keybind? string Push-to-talk keybind
 
 ---@class AudeticUIConfig
----@field window_width? number Feedback window width
----@field success_duration? number How long to show success message (ms)
----@field error_duration? number How long to show error message (ms)
+---@field window_width? number Feedback window width (default: 50)
+---@field window_max_height? number Feedback window max height (default: 10)
+---@field max_event_log? number Max events to keep in chat log (default: 50)
+---@field success_duration? number How long to show success message in ms (default: 2000)
+---@field error_duration? number How long to show error message in ms (default: 4000)
 
 local M = {}
 

@@ -57,14 +57,10 @@ local current_session_id = nil
 ---@type string[] Event log for displaying in UI (chat history, newest last)
 local event_log = {}
 
----@type number Max events to keep in log
-local MAX_EVENT_LOG = 50
-
----@type number Fixed width for feedback window (prevents resize jank)
-local FEEDBACK_WINDOW_WIDTH = 50
-
----@type number Max height for feedback window (content area)
-local FEEDBACK_WINDOW_MAX_HEIGHT = 10
+--- Default values for UI configuration
+local DEFAULT_MAX_EVENT_LOG = 50
+local DEFAULT_WINDOW_WIDTH = 50
+local DEFAULT_WINDOW_MAX_HEIGHT = 10
 
 ---@type number|nil Throttle timer for UI updates
 local ui_update_timer = nil
@@ -151,7 +147,9 @@ local function add_event_to_log(event_text)
   -- Append to end (newest last, for chat-style scrolling)
   table.insert(event_log, sanitized)
   -- Trim old entries from the front
-  while #event_log > MAX_EVENT_LOG do
+  local ui_config = config.get_ui() or {}
+  local max_events = ui_config.max_event_log or DEFAULT_MAX_EVENT_LOG
+  while #event_log > max_events do
     table.remove(event_log, 1)
   end
 end
@@ -446,8 +444,8 @@ show_feedback_window = function(title, lines, hl_group, auto_scroll)
   hl_group = hl_group or "Normal"
 
   local ui_config = config.get_ui() or {}
-  local width = ui_config.window_width or FEEDBACK_WINDOW_WIDTH
-  local max_height = ui_config.window_max_height or FEEDBACK_WINDOW_MAX_HEIGHT
+  local width = ui_config.window_width or DEFAULT_WINDOW_WIDTH
+  local max_height = ui_config.window_max_height or DEFAULT_WINDOW_MAX_HEIGHT
   local content_width = width - 4 -- Account for padding and border
 
   -- Build content: title + separator
