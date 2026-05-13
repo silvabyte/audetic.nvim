@@ -6,10 +6,16 @@ Speak your intent, and let AI make the changes. No typing required.
 
 ## How It Works
 
-1. Press `<leader>r` to start recording
+1. Press `<leader>r` to start recording (or select text in visual mode first to scope the command)
 2. Speak your command (e.g., "add error handling to this function", "rename this variable to userCount")
 3. Press `<leader>r` again to stop
 4. Watch as the AI executes your command on the current buffer
+
+### Selection-aware context
+
+- **Normal mode**: the whole buffer is sent as context.
+- **Visual mode**: the selected range is sent as the primary target, with the rest of the buffer included as surrounding context. The model is instructed to scope changes to the selection.
+- **`:'<,'>AudeticToggle`** (or any line range, e.g. `:5,20AudeticToggle`) works the same way as a visual-mode invocation.
 
 ## Requirements
 
@@ -71,15 +77,17 @@ All options shown are defaults.
 
 ## Keybindings
 
-| Key | Action |
-|-----|--------|
-| `<leader>r` | Start/stop voice recording |
+| Key | Mode | Action |
+|-----|------|--------|
+| `<leader>r` | Normal | Start/stop voice recording (full-buffer context) |
+| `<leader>r` | Visual | Start/stop voice recording, scoped to the current selection |
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `:AudeticToggle` | Toggle voice recording |
+| `:AudeticToggle` | Toggle voice recording (full-buffer context) |
+| `:'<,'>AudeticToggle` | Toggle voice recording scoped to the selected range |
 | `:AudeticCancel` | Cancel active voice operation |
 | `:AudeticStatus` | Show current voice state |
 

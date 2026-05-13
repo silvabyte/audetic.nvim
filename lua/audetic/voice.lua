@@ -57,6 +57,15 @@ local current_session_id = nil
 ---@type string[] Event log for displaying in UI (chat history, newest last)
 local event_log = {}
 
+---@class AudeticSelection
+---@field bufnr number Buffer number the selection was captured from
+---@field start_line number 1-indexed start line (inclusive)
+---@field end_line number 1-indexed end line (inclusive)
+---@field text string Selected text, joined with "\n"
+
+---@type AudeticSelection|nil Selection snapshot captured at toggle time
+local pending_selection = nil
+
 --- Default values for UI configuration
 local DEFAULT_MAX_EVENT_LOG = 50
 local DEFAULT_WINDOW_WIDTH = 50
@@ -672,15 +681,19 @@ local function stop_polling()
 end
 
 ---Get the full buffer context for the AI
+---@param selection AudeticSelection|nil Optional selection snapshot to include
 ---@return table context
-local function get_buffer_context()
-  local bufnr = vim.api.nvim_get_current_buf()
+local function get_buffer_context(selection)
+  -- If a selection was captured, prefer its buffer (the buffer may have changed
+  -- between toggle and execute since recording is async).
+  local bufnr = (selection and vim.api.nvim_buf_is_valid(selection.bufnr)) and selection.bufnr
+    or vim.api.nvim_get_current_buf()
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local cursor = vim.api.nvim_win_get_cursor(0)
   local file_path = vim.api.nvim_buf_get_name(bufnr)
   local filetype = vim.bo[bufnr].filetype
 
-  return {
+  local ctx = {
     file_path = file_path,
     filetype = filetype,
     content = table.concat(lines, "\n"),
@@ -688,6 +701,16 @@ local function get_buffer_context()
     cursor_col = cursor[2],
     total_lines = #lines,
   }
+
+  if selection then
+    ctx.selection = {
+      start_line = selection.start_line,
+      end_line = selection.end_line,
+      text = selection.text,
+    }
+  end
+
+  return ctx
 end
 
 ---Build the prompt for OpenCode
@@ -701,14 +724,47 @@ local function build_prompt(voice_command, context)
     "File: " .. (context.file_path ~= "" and context.file_path or "[unsaved buffer]"),
     "Language: " .. (context.filetype ~= "" and context.filetype or "unknown"),
     "Cursor at line " .. context.cursor_line .. ", column " .. context.cursor_col,
-    "",
-    "Current file content:",
-    "```" .. context.filetype,
-    context.content,
-    "```",
-    "",
-    "Execute the voice command on this file. Make the changes directly to the file.",
   }
+
+  if context.selection then
+    table.insert(
+      parts,
+      string.format(
+        "Selected range: lines %d-%d (inclusive)",
+        context.selection.start_line,
+        context.selection.end_line
+      )
+    )
+    table.insert(parts, "")
+    table.insert(parts, "Selected text:")
+    table.insert(parts, "```" .. context.filetype)
+    table.insert(parts, context.selection.text)
+    table.insert(parts, "```")
+    table.insert(parts, "")
+    table.insert(parts, "Full file content for surrounding context:")
+    table.insert(parts, "```" .. context.filetype)
+    table.insert(parts, context.content)
+    table.insert(parts, "```")
+    table.insert(parts, "")
+    table.insert(
+      parts,
+      "Execute the voice command, scoping changes to the selected range above. "
+        .. "The full file is provided only as surrounding context -- do not modify "
+        .. "lines outside the selected range unless the command explicitly requires it. "
+        .. "Make the changes directly to the file."
+    )
+  else
+    table.insert(parts, "")
+    table.insert(parts, "Current file content:")
+    table.insert(parts, "```" .. context.filetype)
+    table.insert(parts, context.content)
+    table.insert(parts, "```")
+    table.insert(parts, "")
+    table.insert(
+      parts,
+      "Execute the voice command on this file. Make the changes directly to the file."
+    )
+  end
 
   return table.concat(parts, "\n")
 end
@@ -718,8 +774,14 @@ end
 local function execute_voice_command(transcription)
   set_state("executing", { command = transcription })
 
-  -- Get buffer context
-  local context = get_buffer_context()
+  -- Consume any selection that was captured at toggle time. Recording is async,
+  -- so we use the snapshot rather than re-reading visual marks (which may be
+  -- stale or refer to a different buffer by now).
+  local selection = pending_selection
+  pending_selection = nil
+
+  -- Get buffer context (selection-aware)
+  local context = get_buffer_context(selection)
   local prompt = build_prompt(transcription, context)
 
   utils.debug("Executing voice command", { command = transcription })
@@ -861,8 +923,64 @@ local function start_polling(job_id)
   )
 end
 
+---Capture a selection snapshot from explicit line numbers in a buffer
+---@param bufnr number
+---@param start_line number 1-indexed inclusive
+---@param end_line number 1-indexed inclusive
+---@return AudeticSelection|nil
+local function capture_selection(bufnr, start_line, end_line)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+  if not start_line or not end_line or start_line < 1 or end_line < start_line then
+    return nil
+  end
+
+  local total = vim.api.nvim_buf_line_count(bufnr)
+  if start_line > total then
+    return nil
+  end
+  if end_line > total then
+    end_line = total
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(bufnr, start_line - 1, end_line, false)
+  if #lines == 0 then
+    return nil
+  end
+
+  return {
+    bufnr = bufnr,
+    start_line = start_line,
+    end_line = end_line,
+    text = table.concat(lines, "\n"),
+  }
+end
+
+---Capture selection from the current visual-mode marks ('< and '>) in the current buffer.
+---Should be called from a context where the marks are set (i.e. from an x-mode
+---keymap callback, which fires after visual mode is exited and marks are populated).
+---@return AudeticSelection|nil
+local function capture_visual_selection()
+  local bufnr = vim.api.nvim_get_current_buf()
+  local start_line = vim.fn.line("'<")
+  local end_line = vim.fn.line("'>")
+  if start_line == 0 or end_line == 0 then
+    return nil
+  end
+  return capture_selection(bufnr, start_line, end_line)
+end
+
 ---Toggle voice recording
-function M.toggle()
+---@param selection AudeticSelection|nil Optional pre-captured selection snapshot
+function M.toggle(selection)
+  -- Stash the selection (if any) so execute_voice_command can pick it up once
+  -- transcription completes. Only set on the "start recording" path; calling
+  -- toggle a second time to stop should not overwrite the original snapshot.
+  if selection and voice_state == "idle" then
+    pending_selection = selection
+  end
+
   -- Check if OpenCode server URL is configured (it may still be starting up)
   local server_url = server.get_url()
   if not server_url then
@@ -872,7 +990,7 @@ function M.toggle()
     -- Give it a moment and retry
     vim.defer_fn(function()
       if server.get_url() then
-        M.toggle()
+        M.toggle(selection)
       else
         utils.error("Failed to start OpenCode server. Check :checkhealth audetic")
       end
@@ -954,6 +1072,7 @@ function M.cancel()
 
   stop_polling()
   stop_sse()
+  pending_selection = nil
   set_state("idle")
   utils.info("Voice command cancelled")
 end
@@ -973,9 +1092,15 @@ function M.setup()
   end
 
   -- Create user commands
-  vim.api.nvim_create_user_command("AudeticToggle", function()
-    M.toggle()
-  end, { desc = "Toggle Audetic voice recording" })
+  vim.api.nvim_create_user_command("AudeticToggle", function(opts)
+    -- When invoked with a range (e.g. `:'<,'>AudeticToggle` or `:5,10AudeticToggle`),
+    -- nvim sets opts.range > 0 and opts.line1/line2. Capture that as the selection.
+    local selection = nil
+    if opts and opts.range and opts.range > 0 then
+      selection = capture_selection(vim.api.nvim_get_current_buf(), opts.line1, opts.line2)
+    end
+    M.toggle(selection)
+  end, { desc = "Toggle Audetic voice recording", range = true })
 
   vim.api.nvim_create_user_command("AudeticCancel", function()
     M.cancel()
@@ -989,12 +1114,18 @@ function M.setup()
   -- Setup keybind if configured
   local keybind = voice_config.keybind
   if keybind then
-    vim.keymap.set(
-      "n",
-      keybind,
-      M.toggle,
-      { desc = "Toggle Audetic voice recording", silent = true }
-    )
+    -- Normal mode: toggle with no selection (full buffer context)
+    vim.keymap.set("n", keybind, function()
+      M.toggle()
+    end, { desc = "Toggle Audetic voice recording", silent = true })
+
+    -- Visual/select mode: capture the active selection, then toggle.
+    -- In an x-mode keymap callback the '< and '> marks are set to the
+    -- just-active selection, so we read them directly.
+    vim.keymap.set("x", keybind, function()
+      local selection = capture_visual_selection()
+      M.toggle(selection)
+    end, { desc = "Toggle Audetic voice recording (with selection)", silent = true })
   end
 
   utils.debug("Voice module initialized")
