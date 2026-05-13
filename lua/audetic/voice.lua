@@ -8,8 +8,8 @@ local utils = require("audetic.utils")
 local client = require("audetic.client")
 local server = require("audetic.server")
 
----@type string Audetic API base URL
-local AUDETIC_URL = "http://127.0.0.1:3737"
+---@type string Audetic daemon API base URL (daemon mounts all routes under /api)
+local AUDETIC_URL = "http://127.0.0.1:3737/api"
 
 ---@type string|nil Current job ID from Audetic (used for tracking active recording)
 -- selene: allow(unused_variable)
