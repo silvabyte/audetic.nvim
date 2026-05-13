@@ -35,7 +35,7 @@ M.check = function()
 
   -- Check if Audetic is running
   local audetic_running = false
-  local handle = io.popen("curl -s --max-time 1 http://127.0.0.1:3737/status 2>/dev/null")
+  local handle = io.popen("curl -s --max-time 1 http://127.0.0.1:3737/api/status 2>/dev/null")
   if handle then
     local result = handle:read("*a")
     handle:close()
