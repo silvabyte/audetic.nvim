@@ -9,8 +9,19 @@ local port_utils = require("audetic.port")
 ---@type number? Server process handle
 local server_handle = nil
 
----@type number? Server PID
+---@type number? Wrapper PID returned by vim.loop.spawn
+---The `opencode` command is a bash shim that execs `npx`, which then spawns
+---the real `.opencode serve` binary as a grandchild in its own process group.
+---This wrapper PID is therefore unreliable for shutdown -- see daemon_pid.
 local server_pid = nil
+
+---@type number? PID of the actual `.opencode serve` daemon
+---Resolved via `pgrep` once the server is healthy; used for shutdown so the
+---daemon is not orphaned and reparented to init when nvim exits.
+local daemon_pid = nil
+
+---@type number? Port the server is bound to (cached for cleanup)
+local server_port = nil
 
 ---@type string? Server URL
 local server_url = nil
@@ -30,6 +41,35 @@ local HEALTH_CHECK_INTERVAL = 30000
 -- Forward declarations for local functions
 local start_health_timer
 local stop_health_timer
+
+---Resolve the real `.opencode serve` daemon PID by matching the port.
+---The wrapper PID from vim.loop.spawn points at a bash/npx process that has
+---already exec'd by the time we want to shut down, so signaling it does not
+---reach the daemon. Best-effort: if pgrep is unavailable or the daemon hasn't
+---registered yet, daemon_pid stays nil and stop() falls back to pkill.
+---@param port number
+local function discover_daemon_pid(port)
+  if not port then
+    return
+  end
+  local pattern = "opencode serve --port=" .. port
+  vim.fn.jobstart({ "pgrep", "-f", "--", pattern }, {
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if not data then
+        return
+      end
+      for _, line in ipairs(data) do
+        local pid = tonumber(line)
+        if pid then
+          daemon_pid = pid
+          utils.debug("Resolved daemon PID", { wrapper = server_pid, daemon = pid, port = port })
+          return
+        end
+      end
+    end,
+  })
+end
 
 ---Start OpenCode server
 ---@param opts? table Options
@@ -109,6 +149,7 @@ function M.start(opts)
 
   server_handle = handle
   server_pid = pid
+  server_port = port
   server_url = string.format("http://127.0.0.1:%d", port)
 
   utils.info("Starting OpenCode server on port " .. port)
@@ -117,6 +158,9 @@ function M.start(opts)
   vim.defer_fn(function()
     M.health_check_async(function(healthy)
       if healthy then
+        -- Resolve the real daemon PID now that the server is up. The wrapper
+        -- PID we got from spawn is a bash/npx shim that has already exec'd.
+        discover_daemon_pid(port)
         local model_config = config.get_model()
         local model_info = model_config and model_config.model_id or "unknown"
         utils.info("Server started successfully (model: " .. model_info .. ")")
@@ -135,22 +179,53 @@ function M.stop()
   -- Stop health check timer first
   stop_health_timer()
 
-  if not server_handle then
+  if not server_handle and not daemon_pid and not server_port then
     utils.debug("No server to stop")
     return
   end
 
+  utils.debug("Stopping server", {
+    wrapper = server_pid,
+    daemon = daemon_pid,
+    port = server_port,
+  })
+
+  -- Prefer signaling the daemon's process group so any children also exit.
+  -- A negative PID targets the process group on Unix (kill(2)). The daemon
+  -- is spawned detached and is typically its own pgid leader.
+  if daemon_pid then
+    pcall(vim.loop.kill, -daemon_pid, "sigterm")
+    pcall(vim.loop.kill, daemon_pid, "sigterm")
+  end
+
+  -- Signal the wrapper PID too -- usually already gone, but harmless.
   if server_pid then
-    utils.debug("Stopping server", { pid = server_pid })
-    vim.loop.kill(server_pid, "sigterm")
+    pcall(vim.loop.kill, server_pid, "sigterm")
+  end
+
+  -- Belt-and-suspenders: if pgrep never resolved (e.g. exit before health
+  -- check completed), match by the port-scoped command line. This is
+  -- specific enough not to touch other audetic.nvim instances.
+  if not daemon_pid and server_port then
+    pcall(vim.fn.system, {
+      "pkill",
+      "-TERM",
+      "-f",
+      "--",
+      "opencode serve --port=" .. server_port,
+    })
   end
 
   if server_handle then
-    server_handle:close()
+    pcall(function()
+      server_handle:close()
+    end)
   end
 
   server_handle = nil
   server_pid = nil
+  daemon_pid = nil
+  server_port = nil
   server_url = nil
   server_healthy = false
 
